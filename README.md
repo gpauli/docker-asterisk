@@ -17,7 +17,7 @@ Start build.sh
 
 * start with start.sh
   * reuse a previous container if exists
-* stop euth stop.sh
+* stop with stop.sh
   * container will not deleted
 * save data with backup.sh
 * restore data wih restore.sh
