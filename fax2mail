@@ -1,0 +1,221 @@
+#!/bin/sh
+#--------------------------------------------------------------------------
+#                                                                         |                          
+# File: fax2mail                                                          |
+# Type: BASH script                                                       |
+# Summary: fax to E-Mail helper application for asterisk PBX              |
+# Description: fax2mail is a helper application which sits between        |
+#   asterisk and a MTA.  Is is designed to be called by asterisk upon the |
+#   receipt of a new fax.  It will forward the received fax to the email  |
+#   address of choice, and will convert the file the one of several       |
+#   formats.                                                              |
+# Usage:                                                                  |
+#   fax2mail expects seven parameters from asterisk as follows:           |
+#   $1 = CallerID Number of fax sender                                    |
+#   $2 = CallerID Name of fax sender                                      |
+#   $3 = Fax number called                                                |
+#   $4 = Destination name                                                 |
+#   $5 = Destination email address                                        |
+#   $6 = Fax file name (without .tif extension)                           |
+#   $7 = Format conversion (n=none,p=pdf,e=eps)                           |
+#   $8 = Fax Status                                                       |
+#   $9 = Fax Error                                                        |
+#  $10 = Fax Mode                                                         |
+#  $11 = Number of Fax Pages                                              |
+#  $12 = Fax Resolution                                                   |
+# Dependencies:                                                           |
+#   This application requires asterisk, tiff-tools                        |
+#   mini-sdnemail                                                         |
+# Author:                                                                 | 
+#   Designed and written by Michelle Dupuis on October 7, 2005            |                       
+#   Michelle can be reached at support@ocgca                              | 
+#   This script and other related tools are avaiable for download         | 
+#   at www.generationd.com                                                |
+#   Ner Version Gerd Pauli gp@high-consulting.de 2019                     |                         
+#-------------------------------------------------------------------------- 
+#                                                                         |                                 
+# DATE         VER  AUTHOR        DESCRIPTION                             | 
+# Oct 7 2005   1.0  M Dupuis      Original coding                         |
+# Oct 9 2005   1.8  M Dupuis      Better parameter & email checking       |
+# Oct 23 2005  1.9  M Dupuis      Syntax error fixes, hand ! in ID name   |
+# Oct 25 2005  2.0  M Dupuis      Improved page count mechanism           |
+# May 07 2019  3.0  G Pauli       Alpine Linux & Docker                   |
+#--------------------------------------------------------------------------
+#!/Bin/bash
+# Script to mail the received file to the specified user
+# Send the tiff file to the email address
+
+VERSION="fax2mail v3.0 - by Gerd Pauli - gp@high-consulting.de"
+DATETIME=$(date +"%A, %B %d %Y, at %I:%M %p")
+tmpfile=$(mktemp /tmp/fax2mail.XXXXXX)
+trap 'rm -f -- "$tmpfile"' INT TERM HUP EXIT
+
+echo >>/var/log/asterisk/faxlog
+echo $VERSION >>/var/log/asterisk/faxlog
+echo "  "Triggered on $DATETIME >>/var/log/asterisk/faxlog
+echo "  "\$1 = CallerID number of fax sender = $1  >>/var/log/asterisk/faxlog
+echo "  "\$2 = CallerID name of fax sender = $2  >>/var/log/asterisk/faxlog
+echo "  "\$3 = Fax number called = $3  >>/var/log/asterisk/faxlog
+echo "  "\$4 = Destination name = $4  >>/var/log/asterisk/faxlog
+echo "  "\$5 = Destination email address = $5  >>/var/log/asterisk/faxlog
+echo "  "\$6 = Fax file name \(without .tif extension\) = $6  >>/var/log/asterisk/faxlog
+echo "  "\$7 = Format conversion \(n=none,p=pdf,e=eps\) = $7  >>/var/log/asterisk/faxlog
+
+if [ $# -lt 6 ] ; then
+    echo ""
+    echo $VERSION
+    echo ""
+    echo "  "Error: Expected 7 parameters, received $# parameters
+    echo "  "Error: Expected 7 parameters, received $# parameters >>/var/log/asterisk/faxlog
+    echo ""
+    echo "  "Usage: fax2mail \$1 \$2 \$3 \$4 \$5 \$6 \$7
+    echo ""
+    echo "    "\$1 = CallerID number of fax sender
+    echo "    "\$2 = CallerID name of fax sender = $1  >>/var/log/asterisk/faxlog
+    echo "    "\$3 = Fax number called
+    echo "    "\$4 = Destination name
+    echo "    "\$5 = Destination email address
+    echo "    "\$6 = Fax file name \(without .tif extension\)
+    echo "    "\$7 = Format conversion \(n=none,p=pdf,e=eps\)
+    echo ""
+    exit 1
+fi
+
+# Correct for missing info
+if [ -z $1 ] ; then
+    p1="<unknown number>"
+else
+    p1=$1
+fi
+# Must surround in quotes in case name is preceded by a !
+if [ -z "$2" ] ; then
+    p2="<unknown name>"
+else
+    p2=$2
+fi
+if [ -z $3 ] ; then
+    p3="<unknown number>"
+else
+    p3=$3
+fi
+
+# muttrc
+# sendmail special command and no sent folder
+echo "set sendmail=\"/usr/sbin/sendmail -oem -oi -S mail.high-consulting.de\"" > $tmpfile
+echo "set copy=no" >> $tmpfile
+
+SOURCEFILE=$6.tif
+if [ -e $6.tif ]; then
+    echo "  "Fax file $6.tif found. >>/var/log/asterisk/faxlog
+    
+    # Read data from TIFF file
+    if [ -n "$11" ] ; then
+	COUNT=$11
+    else
+	PAGES=$(tiffinfo $6.tif | grep "Page" | cut -d " " -f 5)
+	COUNT=${PAGES#*-}
+	if [ -z $COUNT ]; then
+	    # If didn't find a page count, use the number of occurances of "spandsp"
+	    COUNT=$(grep -c "spandsp" $6.tif)
+	    if [ -z $COUNT ]
+	    then
+		COUNT="<unknown>"
+	    fi
+	fi
+    fi
+    DT=$(tiffinfo $6.tif | grep "Date")
+    DTFAX=${DT#*:}
+    
+    # Do any conversions requested
+    case "$7" in
+
+	# Check if PDF conversion required
+	"P" | "p" )
+	    DESTFILE=$6.pdf
+	    MIMETYPE=pdf
+	    tiff2pdf -f -p letter $SOURCEFILE > $DESTFILE
+	    rm -f $SOURCEFILE
+	    echo "  "Converted $SOURCEFILE to $DESTFILE. >>/var/log/asterisk/faxlog
+	    ;;
+	
+	# Check if EPS conversion required
+	"E" | "e" )
+	    DESTFILE=$6.eps
+	    MIMETYPE=eps
+	    tiff2ps -2eaz -w 8.3 -h 11.7 $SOURCEFILE > $DESTFILE
+	    rm -f $SOURCEFILE
+	    echo "  "Converted $SOURCEFILE to $DESTFILE. >>/var/log/asterisk/faxlog
+	    ;;
+	
+	# Check if no conversion required ("N" | "n" )
+	*)
+	    DESTFILE=$6.tif
+	    MIMETYPE=tif
+	    echo "  "No conversion of $SOURCEFILE required. >>/var/log/asterisk/faxlog
+	    ;;
+    esac
+
+    
+    echo Dear $4, >>$6.txt
+    echo >>$6.txt
+    echo You have just received a $COUNT page fax from $p2 \<$p1\>, >> $6.txt
+    echo at phone number $p3, on $DATETIME. >> $6.txt
+    echo The original fax document is attached in $MIMETYPE format. >> $6.txt
+    if [ -n "$8" ] ; then
+	echo "###       FAXSTATUS: $8" >> $6.txt
+    fi
+    if [ -n "$9" ] ; then
+	echo "###        FAXERROR: $9" >> $6.txt
+    fi
+    if [ -n "$10" ] ; then
+	echo "###         FAXMODE: $10" >> $6.txt
+    fi
+    if [ -n "$12" ] ; then
+	echo "###   FAXRESOLUTION: $12" >> $6.txt
+    fi
+    echo >>$6.txt
+    echo >>$6.txt
+    echo >>$6.txt
+
+    cat $6.txt | mutt -F $tmpfile -s "New fax from $p1" -a $DESTFILE -- $5
+    
+    echo "  "E-mailed file to $5 >>/var/log/asterisk/faxlog
+    
+    # Delete the destination file
+    echo "  "Removing destination file $DESTFILE >>/var/log/asterisk/faxlog
+    rm -f $DESTFILE
+    # Delete the source file
+    echo "  "Removing source file $SOURCEFILE >>/var/log/asterisk/faxlog
+    rm -f $SOURCEFILE
+    
+    # Exit with OK status code
+    RETVAL=0
+    
+    # Else tif file is missing
+else
+    echo "  "Fax file $6.tif not found. >>/var/log/asterisk/faxlog
+    rm -f $6.txt
+    echo Dear $4, >>$6.txt
+    echo >>$6.txt
+    echo You have just received a fax attempt from $p2 \<$p1\>,>>$6.txt
+    echo at phone number $p3, on $DATETIME. >>$6.txt
+    echo There was a problem receiving the fax.  >>$6.txt
+    if [ -n "$8" ] ; then
+	echo "###       FAXSTATUS: $8" >> $6.txt
+    fi
+    if [ -n "$9" ] ; then
+	echo "###        FAXERROR: $9" >> $6.txt
+    fi
+    echo >>$6.txt
+    echo >>$6.txt
+    
+    cat $6.txt $DESTFILE | mutt -F $tmpfile -s "Failed fax attempt from $1"  -- $5
+    
+    echo "  "E-mailed warning to $5 >>/var/log/asterisk/faxlog
+    RETVAL=1
+fi
+# Delete the temporary message file
+rm -f $6.txt
+echo >>/var/log/asterisk/faxlog
+# exit with failure code
+exit $RETVAL
